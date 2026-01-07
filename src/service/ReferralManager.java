@@ -1,0 +1,128 @@
+package service;
+
+import data.CsvRepository;
+import data.DataStore;
+import model.Clinician;
+import model.Facility;
+import model.Patient;
+import model.Referral;
+
+import java.io.File;
+import java.io.IOException;
+import java.time.LocalDate;
+import java.util.ArrayDeque;
+import java.util.Deque;
+
+/**
+ * Singleton referral management component (as required).
+ * Manages referral queue, generates "email" text content and persists referrals.
+ */
+public final class ReferralManager {
+    private static volatile ReferralManager instance;
+
+    private final DataStore ds;
+    private final LookupService lookup;
+    private final CsvRepository repo;
+
+    private final Deque<Referral> referralQueue = new ArrayDeque<>();
+
+    private ReferralManager(DataStore ds, LookupService lookup, CsvRepository repo) {
+        this.ds = ds;
+        this.lookup = lookup;
+        this.repo = repo;
+    }
+
+    public static ReferralManager getInstance(DataStore ds, LookupService lookup, CsvRepository repo) {
+        if (instance == null) {
+            synchronized (ReferralManager.class) {
+                if (instance == null) instance = new ReferralManager(ds, lookup, repo);
+            }
+        }
+        return instance;
+    }
+
+    public void enqueue(Referral referral) {
+        referralQueue.addLast(referral);
+    }
+
+    public Referral peekNext() {
+        return referralQueue.peekFirst();
+    }
+
+    public Referral processNext(File outputDir) throws IOException {
+        Referral r = referralQueue.pollFirst();
+        if (r == null) return null;
+
+        // persist to referrals.csv (append + reload) - keeps audit trail
+        ds.referrals.add(r);
+        repo.saveReferrals(ds);
+
+        // generate email/referral letter text
+        String text = generateReferralText(r);
+        File out = new File(outputDir, "referral_" + r.getReferralId() + ".txt");
+        writeText(out, text);
+
+        // also append to a combined log file
+        File combined = new File(outputDir, "referrals_outbox.txt");
+        appendText(combined, text + System.lineSeparator() + "-----" + System.lineSeparator());
+
+        return r;
+    }
+
+
+    private void writeText(File file, String text) throws IOException {
+        try (java.io.FileWriter fw = new java.io.FileWriter(file, false)) {
+            fw.write(text);
+        }
+    }
+
+    private void appendText(File file, String text) throws IOException {
+        try (java.io.FileWriter fw = new java.io.FileWriter(file, true)) {
+            fw.write(text);
+        }
+    }
+
+    public String generateReferralText(Referral r) {
+        Patient p = lookup.findPatient(r.getPatientId());
+        Clinician from = lookup.findClinician(r.getReferringClinicianId());
+        Clinician to = lookup.findClinician(r.getReferredToClinicianId());
+        Facility fromFac = lookup.findFacility(r.getReferringFacilityId());
+        Facility toFac = lookup.findFacility(r.getReferredToFacilityId());
+
+        String today = LocalDate.now().toString();
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("REFERRAL LETTER (Simulated Email)\n");
+        sb.append("Date: ").append(today).append("\n");
+        sb.append("Referral ID: ").append(r.getReferralId()).append("\n\n");
+
+        sb.append("Patient: ").append(p != null ? p.getFullName() : r.getPatientId()).append("\n");
+        if (p != null) {
+            sb.append("NHS Number: ").append(p.getNhsNumber()).append("\n");
+            sb.append("DOB: ").append(p.getDateOfBirth()).append("\n");
+            sb.append("Contact: ").append(p.getPhone()).append("\n");
+        }
+        sb.append("\n");
+
+        sb.append("From Clinician: ").append(from != null ? from.getFullName() : r.getReferringClinicianId());
+        if (from != null) sb.append(" (").append(from.getTitle()).append(" - ").append(from.getSpeciality()).append(")");
+        sb.append("\n");
+        sb.append("From Facility: ").append(fromFac != null ? fromFac.getName() : r.getReferringFacilityId()).append("\n\n");
+
+        sb.append("To Clinician/Service: ").append(to != null ? to.getFullName() : r.getReferredToClinicianId()).append("\n");
+        sb.append("To Facility: ").append(toFac != null ? toFac.getName() : r.getReferredToFacilityId()).append("\n\n");
+
+        sb.append("Urgency: ").append(r.getUrgency()).append("\n");
+        sb.append("Clinical Summary: ").append(r.getClinicalSummary()).append("\n");
+        sb.append("Diagnosis/Concern: ").append(r.getDiagnosis()).append("\n");
+        sb.append("Current Medications: ").append(r.getMedications()).append("\n");
+        sb.append("Investigations: ").append(r.getInvestigations()).append("\n\n");
+
+        sb.append("Notes: ").append(r.getNotes()).append("\n");
+        sb.append("Status: ").append(r.getStatus()).append("\n");
+        sb.append("Linked Appointment: ").append(r.getAppointmentId()).append("\n");
+
+        sb.append("\nAudit Trail: generated by ReferralManager singleton; message persisted to outbox.\n");
+        return sb.toString();
+    }
+}
